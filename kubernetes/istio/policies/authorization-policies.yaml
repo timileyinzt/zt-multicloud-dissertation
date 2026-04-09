@@ -1,0 +1,112 @@
+# =============================================================================
+# AuthorizationPolicy — Default DENY All (Zero Trust baseline)
+#
+# NIST SP 800-207 Tenet T3: Access to resources granted on per-session basis
+# NIST SP 800-207 Tenet T6: Least-privilege — nothing allowed unless explicit
+#
+# This is the cornerstone of Zero Trust in Istio:
+# 1. Deny everything by default (this policy)
+# 2. Explicitly allow only what is needed (policies below)
+#
+# Without this default-deny, Istio allows all authenticated traffic
+# between services — which is NOT Zero Trust, merely authenticated perimeter.
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all-default
+  namespace: zt-demo
+spec:
+  {}
+  # Empty spec with no action = DENY ALL by default
+  # This single resource enforces ZT principle: nothing permitted unless stated
+
+---
+# =============================================================================
+# AuthorizationPolicy — Allow frontend to call backend API
+#
+# Explicit allow rule: frontend ServiceAccount can call /api/* on backend
+# Any other source attempting to reach backend is still denied
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: zt-demo
+spec:
+  # Target: backend service
+  selector:
+    matchLabels:
+      app: zt-backend
+
+  action: ALLOW
+
+  rules:
+    - from:
+        # Source must be the frontend service account — SPIFFE identity verified
+        - source:
+            principals:
+              - "cluster.local/ns/zt-demo/sa/zt-frontend"
+      to:
+        # Only allow GET requests to /api/ paths
+        - operation:
+            methods: ["GET"]
+            paths: ["/api/*"]
+      when:
+        # Additional condition: request must come via mTLS (redundant with
+        # PeerAuthentication STRICT but documents the intent explicitly)
+        - key: connection.mtls
+          values: ["true"]
+
+---
+# =============================================================================
+# AuthorizationPolicy — Allow Prometheus scraping (monitoring)
+#
+# NIST T5: Continuous monitoring requires metrics collection
+# Without this, Prometheus cannot scrape Envoy metrics
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: zt-demo
+spec:
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["monitoring"]  # Prometheus runs in monitoring namespace
+      to:
+        - operation:
+            ports: ["15090"]  # Envoy Prometheus metrics port
+            methods: ["GET"]
+            paths: ["/stats/prometheus"]
+
+---
+# =============================================================================
+# AuthorizationPolicy — Allow ingress gateway to reach frontend
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: zt-demo
+spec:
+  selector:
+    matchLabels:
+      app: zt-frontend
+
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+            ports: ["3000"]

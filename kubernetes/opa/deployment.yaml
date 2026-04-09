@@ -1,0 +1,139 @@
+# =============================================================================
+# OPA Gatekeeper — Kubernetes Admission Controller
+#
+# NIST SP 800-207 Tenet T4: Access determined by dynamic policy
+# NIST SP 800-207 Tenet T6: Least-privilege enforced at admission time
+#
+# OPA Gatekeeper intercepts every resource creation/update request at the
+# Kubernetes API server and evaluates it against Rego policies.
+# Non-compliant resources are rejected before they reach any node.
+#
+# This is the Kubernetes-native Policy Decision Point (PDP) component,
+# complementing Istio's network-level enforcement.
+#
+# Installation: kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/gatekeeper/release-3.14/deploy/gatekeeper.yaml
+# Or use this file for manual review of what is being deployed.
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gatekeeper-system
+  labels:
+    # Explicitly disable Istio injection for OPA — it manages admission webhooks
+    # which cannot have a sidecar proxy intercepting webhook traffic
+    istio-injection: disabled
+    app.kubernetes.io/name: gatekeeper
+    app.kubernetes.io/part-of: zt-dissertation
+
+---
+# ConstraintTemplate — defines the schema for our no-privileged-containers policy
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: ztnoPrivilegedContainers
+  annotations:
+    description: "ZT Policy: Block privileged containers, hostPID, hostNetwork. NIST T6."
+spec:
+  crd:
+    spec:
+      names:
+        kind: ZtNoPrivilegedContainers
+      validation:
+        openAPIV3Schema:
+          type: object
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package ztdissertation
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Pod"
+          container := input.review.object.spec.containers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("ZT Policy DENIED: Container '%v' requests privileged mode. Violates NIST T6.", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Pod"
+          input.review.object.spec.hostPID == true
+          msg := "ZT Policy DENIED: Pod requests hostPID. Violates workload isolation."
+        }
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Pod"
+          input.review.object.spec.hostNetwork == true
+          msg := "ZT Policy DENIED: Pod requests hostNetwork. Would bypass Istio mTLS."
+        }
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Pod"
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          not input.review.object.metadata.annotations["zt-policy/allow-root"]
+          msg := sprintf("ZT Policy DENIED: Container '%v' must set runAsNonRoot: true. NIST T6.", [container.name])
+        }
+
+---
+# Constraint — activates the template for the zt-demo namespace
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ZtNoPrivilegedContainers
+metadata:
+  name: zt-no-privileged-in-demo
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["zt-demo"]
+  enforcementAction: deny  # deny = hard block (not just warn)
+
+---
+# ConstraintTemplate — require ZT owner labels on all pods
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: ztRequireLabels
+  annotations:
+    description: "ZT Policy: All pods must have owner and environment labels for audit trail. NIST T5."
+spec:
+  crd:
+    spec:
+      names:
+        kind: ZtRequireLabels
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            labels:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package ztlabels
+
+        violation[{"msg": msg}] {
+          provided := {label | input.review.object.metadata.labels[label]}
+          required := {label | label := input.parameters.labels[_]}
+          missing  := required - provided
+          count(missing) > 0
+          msg := sprintf("ZT Policy DENIED: Missing required labels: %v. Required for audit trail (NIST T5).", [missing])
+        }
+
+---
+# Constraint — enforce owner + env labels in zt-demo namespace
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ZtRequireLabels
+metadata:
+  name: zt-require-labels-demo
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["zt-demo"]
+  parameters:
+    labels: ["app", "owner", "version"]
+  enforcementAction: deny

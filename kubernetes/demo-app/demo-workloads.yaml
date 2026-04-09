@@ -1,0 +1,247 @@
+# =============================================================================
+# Demo Application — Zero Trust Enforcement Showcase
+#
+# Two workloads: zt-frontend and zt-backend
+# Purpose: Demonstrate that ZT controls work end-to-end:
+#   1. Both pods get Istio sidecars (mTLS identity)
+#   2. Frontend can reach backend (AuthorizationPolicy allows it)
+#   3. Any other workload trying to reach backend is denied
+#   4. OPA Gatekeeper enforces labels and non-root execution
+#
+# Used in dissertation Chapter 4 for artefact demonstration and screenshots.
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zt-demo
+  labels:
+    # Enable Istio sidecar injection for ALL pods in this namespace
+    istio-injection: enabled
+
+---
+# ── Service Accounts (SPIFFE identity basis) ──────────────────────────────────
+# Istio uses the Kubernetes service account to generate the SPIFFE SVID.
+# Each workload has its own SA — never share service accounts between workloads.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zt-frontend
+  namespace: zt-demo
+  annotations:
+    # Azure Workload Identity — pod gets an Entra ID token automatically
+    azure.workload.identity/client-id: "${AZURE_CLIENT_ID}"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zt-backend
+  namespace: zt-demo
+  annotations:
+    azure.workload.identity/client-id: "${AZURE_CLIENT_ID}"
+
+---
+# ── Backend Deployment ────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zt-backend
+  namespace: zt-demo
+  labels:
+    app: zt-backend
+    owner: dissertation-w24065387
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zt-backend
+  template:
+    metadata:
+      labels:
+        # OPA ZtRequireLabels: all three required labels present
+        app: zt-backend
+        owner: dissertation-w24065387
+        version: v1
+      annotations:
+        # Istio sidecar will be injected automatically (namespace label)
+        # Explicitly setting injection annotation for clarity
+        sidecar.istio.io/inject: "true"
+    spec:
+      serviceAccountName: zt-backend
+
+      # OPA ZtNoPrivilegedContainers: securityContext enforced
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: backend
+          # Using a simple echo server for demonstration
+          image: hashicorp/http-echo:latest
+          args:
+            - "-text=ZT Backend Response: Identity verified, request authorised"
+            - "-listen=:8080"
+          ports:
+            - containerPort: 8080
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+---
+# Backend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: zt-backend
+  namespace: zt-demo
+  labels:
+    app: zt-backend
+spec:
+  selector:
+    app: zt-backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# ── Frontend Deployment ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zt-frontend
+  namespace: zt-demo
+  labels:
+    app: zt-frontend
+    owner: dissertation-w24065387
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zt-frontend
+  template:
+    metadata:
+      labels:
+        app: zt-frontend
+        owner: dissertation-w24065387
+        version: v1
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      serviceAccountName: zt-frontend
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: frontend
+          image: nginx:1.25-alpine
+          ports:
+            - containerPort: 3000
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # nginx needs write access to /var/cache
+            runAsNonRoot: true
+            runAsUser: 101  # nginx group
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+---
+# Frontend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: zt-frontend
+  namespace: zt-demo
+  labels:
+    app: zt-frontend
+spec:
+  selector:
+    app: zt-frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  type: ClusterIP
+
+---
+# ── Test Pod — Verify ZT Denial ───────────────────────────────────────────────
+# This pod is in a DIFFERENT service account (zt-test-unauthorized)
+# It should be DENIED access to zt-backend by the AuthorizationPolicy.
+# Use it during viva to demonstrate ZT enforcement in action.
+#
+# Test command after deployment:
+#   kubectl exec -n zt-demo zt-test-unauthorized -- curl http://zt-backend:8080/api/test
+#   Expected: RBAC: access denied (Istio 403)
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zt-test-unauthorized
+  namespace: zt-demo
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: zt-test-unauthorized
+  namespace: zt-demo
+  labels:
+    app: zt-test-unauthorized
+    owner: dissertation-w24065387
+    version: v1
+spec:
+  serviceAccountName: zt-test-unauthorized
+  containers:
+    - name: curl
+      image: curlimages/curl:latest
+      command: ["sleep", "3600"]  # Keep running for manual test commands
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi

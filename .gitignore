@@ -1,0 +1,16 @@
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.auto.tfvars
+.env
+*.env
+*.pem
+*.key
+*credentials*
+*secret*
+.DS_Store
+.vscode/
+.idea/

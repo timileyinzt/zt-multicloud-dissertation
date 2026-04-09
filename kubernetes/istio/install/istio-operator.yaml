@@ -1,0 +1,94 @@
+# =============================================================================
+# Istio Operator — Zero Trust Strict mTLS Profile
+#
+# NIST SP 800-207 Tenet T2: All communication secured regardless of location
+# NIST SP 800-207 Tenet T3: Per-session access with cryptographic verification
+#
+# Design decision: STRICT mode globally from installation
+# Rationale: PERMISSIVE mode (allows plaintext) is a migration aid, not a
+# security control. Starting in STRICT enforces Zero Trust from day one.
+# See lab-notebook.md Entry 2.2
+#
+# Usage: istioctl install -f istio-operator.yaml
+# =============================================================================
+
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: zt-dissertation-istio
+  namespace: istio-system
+spec:
+  profile: default
+
+  meshConfig:
+    # NIST T2: Enforce mTLS for all service-to-service communication
+    # STRICT = reject plaintext, require valid certificate from SPIFFE/SPIRE
+    defaultConfig:
+      proxyMetadata:
+        ISTIO_META_DNS_CAPTURE: "true"
+
+    # Enable access logging — required for NIST T5 continuous monitoring
+    accessLogFile: /dev/stdout
+    accessLogFormat: |
+      {
+        "timestamp": "%START_TIME%",
+        "method": "%REQ(:METHOD)%",
+        "path": "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%",
+        "protocol": "%PROTOCOL%",
+        "response_code": "%RESPONSE_CODE%",
+        "source_principal": "%DOWNSTREAM_PEER_PRINCIPAL%",
+        "destination_principal": "%UPSTREAM_PEER_PRINCIPAL%",
+        "source_namespace": "%DOWNSTREAM_PEER_NAMESPACE%",
+        "bytes_received": "%BYTES_RECEIVED%",
+        "duration": "%DURATION%",
+        "upstream_service": "%REQ(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+      }
+
+    # Enable distributed tracing — supports ZT anomaly detection
+    enableTracing: true
+
+    # Outbound traffic policy: REGISTRY_ONLY
+    # NIST T3: Only allow traffic to services registered in the mesh
+    # Prevents workloads from calling arbitrary external endpoints
+    outboundTrafficPolicy:
+      mode: REGISTRY_ONLY
+
+  components:
+    pilot:
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+    # Ingress gateway — entry point for external traffic
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true
+        k8s:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          service:
+            type: LoadBalancer
+
+  values:
+    global:
+      # SPIFFE-based workload identity — cryptographic identity for every pod
+      # Each pod gets a SVID (SPIFFE Verifiable Identity Document)
+      mtls:
+        enabled: true
+        auto: true
+
+    pilot:
+      # Enable namespace-level isolation
+      enableProtocolSniffing: true
+
+    sidecarInjectorWebhook:
+      # Inject Envoy proxy into all pods automatically
+      enableNamespacesByDefault: false
+      # Only inject into namespaces with label: istio-injection=enabled

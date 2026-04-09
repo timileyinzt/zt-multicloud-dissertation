@@ -1,0 +1,37 @@
+# =============================================================================
+# PeerAuthentication — Global STRICT mTLS Enforcement
+#
+# NIST SP 800-207 Tenet T2: All communication secured regardless of location
+# Applied at mesh level: affects ALL namespaces in the cluster
+#
+# Effect: Every pod-to-pod communication MUST use mutual TLS.
+# Any plaintext connection is rejected at the Envoy sidecar level.
+# This means every service must present a valid SPIFFE certificate.
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: global-strict-mtls
+  namespace: istio-system  # istio-system scope = applies mesh-wide
+spec:
+  mtls:
+    mode: STRICT
+    # STRICT: mTLS required. Plaintext connections are rejected.
+    # PERMISSIVE: would allow plaintext (NOT Zero Trust compliant)
+    # DISABLE: would remove mTLS entirely (NOT acceptable)
+
+---
+# =============================================================================
+# PeerAuthentication — zt-demo Namespace (explicit redundant enforcement)
+# Belt-and-suspenders: namespace-level policy in addition to mesh-level
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: zt-demo-strict-mtls
+  namespace: zt-demo
+spec:
+  mtls:
+    mode: STRICT
